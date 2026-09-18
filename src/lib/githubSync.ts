@@ -76,6 +76,14 @@ export async function fetchGithubFileArrayBuffer(targetUrl: string): Promise<Arr
   }
   
   // If targetUrl contains revisita filename variations
+  if (primaryUrl.includes('OUTAGE_SGO') || primaryUrl.includes('outage')) {
+    candidates.push(primaryUrl.replace('OUTAGE_SGO.xlsx', 'OUTAGE_SGO_JAN_JUN.xlsx'));
+    candidates.push(primaryUrl.replace('OUTAGE_SGO.xlsx', 'OUTAGE_SGO_JUL_DEZ.xlsx'));
+    candidates.push(primaryUrl.replace('OUTAGE_SGO.xlsx', 'OUTAGE_SGO_Jan_Jun.xlsx'));
+    candidates.push(primaryUrl.replace('OUTAGE_SGO.xlsx', 'OUTAGE_SGO_Jul_Dez.xlsx'));
+    candidates.push(primaryUrl.replace('OUTAGE_SGO.xlsx', 'OUTAGE_SGO.XLSX'));
+    candidates.push(primaryUrl.replace('OUTAGE_SGO.xlsx', 'OUTAGE.xlsx'));
+  }
   if (primaryUrl.includes('REVISITA_30D_202608_Norte.xlsx')) {
     candidates.push(primaryUrl.replace('REVISITA_30D_202608_Norte.xlsx', 'REVISITA_30D_Norte.xlsx'));
   }

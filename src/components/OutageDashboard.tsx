@@ -96,6 +96,8 @@ export interface OutageEvent {
   duracaoMinutos?: number;
   descricao?: string;
   fullDate?: Date;
+  abaOrigem?: string; // Nome da aba lida no Excel (ex: 'JAN_JUN', 'JUL_DEZ', etc.)
+  semestre?: string;  // '1º Semestre' ou '2º Semestre'
 }
 
 // Month names in Portuguese
@@ -110,6 +112,15 @@ const detectMonthIndex = (val: any): number => {
   if (typeof val === 'number' && val >= 1 && val <= 12) return val - 1;
   const str = String(val).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
   if (!str) return -1;
+
+  // Protect semester ranges so sheets like JAN_JUN or JUL_DEZ are NOT treated as a single month
+  if (
+    str.includes('jan_jun') || str.includes('jan-jun') || str.includes('janjun') || str.includes('jan_a_jun') || (str.includes('jan') && str.includes('jun')) ||
+    str.includes('jul_dez') || str.includes('jul-dez') || str.includes('juldez') || str.includes('jul_a_dez') || (str.includes('jul') && str.includes('dez')) ||
+    str.includes('semestre') || str.includes('1_sem') || str.includes('2_sem') || str.includes('1sem') || str.includes('2sem')
+  ) {
+    return -1;
+  }
 
   if (str === '01' || str === '1' || str.includes('jan')) return 0;
   if (str === '02' || str === '2' || str.includes('fev') || str.includes('feb')) return 1;
@@ -496,6 +507,10 @@ export default function OutageDashboard({
   const [isImporting, setIsImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(0);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importSuccessInfo, setImportSuccessInfo] = useState<{
+    sheetsRead: { sheetName: string; count: number; semester?: string }[];
+    totalEvents: number;
+  } | null>(null);
   const [showGithubInput, setShowGithubInput] = useState(false);
   const [githubUrl, setGithubUrl] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
@@ -513,6 +528,7 @@ export default function OutageDashboard({
   const [filters, setFilters] = useState(() => {
     const initialMonth = getCurrentOrLatestMonth(data);
     return {
+      semestre: 'Todos' as 'Todos' | '1º Semestre' | '2º Semestre',
       mes: [initialMonth] as string[],
       semana: ['Todos'] as string[],
       cidade: ['Todos'] as string[],
@@ -526,6 +542,28 @@ export default function OutageDashboard({
     };
   });
 
+  // Information about all origin sheets detected in data
+  const detectedSheetsSummary = useMemo(() => {
+    if (importSuccessInfo && importSuccessInfo.sheetsRead.length > 0) {
+      return importSuccessInfo.sheetsRead;
+    }
+    const map: Record<string, { count: number; semester?: string }> = {};
+    data.forEach(d => {
+      const sheet = d.abaOrigem || (['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho'].includes(d.mes) ? 'JAN_JUN' : 'JUL_DEZ');
+      const is1st = d.semestre === '1º Semestre' || ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho'].includes(d.mes);
+      const sem = d.semestre || (is1st ? '1º Semestre' : '2º Semestre');
+      if (!map[sheet]) {
+        map[sheet] = { count: 0, semester: sem };
+      }
+      map[sheet].count += 1;
+    });
+    return Object.entries(map).map(([sheetName, info]) => ({
+      sheetName,
+      count: info.count,
+      semester: info.semester
+    }));
+  }, [data, importSuccessInfo]);
+
   // Dynamic filter options based on available data (cascading when month, week, or city is chosen)
   const filterOptions = useMemo(() => {
     const isAllOrEmptyArr = (arr?: string[]) => !arr || arr.length === 0 || arr.includes('Todos');
@@ -533,6 +571,15 @@ export default function OutageDashboard({
 
     // Data scoped to chosen month, week and cities for cascading
     const scoped = data.filter(d => {
+      if (filters.semestre && filters.semestre !== 'Todos') {
+        const is1st = filters.semestre === '1º Semestre';
+        const dSem = d.semestre;
+        const dMes = d.mes;
+        const is1stItem = dSem === '1º Semestre' || ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho'].includes(dMes);
+        const is2ndItem = dSem === '2º Semestre' || ['Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'].includes(dMes);
+        if (is1st && !is1stItem) return false;
+        if (!is1st && !is2ndItem) return false;
+      }
       if (!isAllOrEmptyArr(filters.mes)) {
         const dMes = normStr(d.mes);
         if (!filters.mes.some(m => normStr(m) === dMes || dMes.includes(normStr(m)))) return false;
@@ -550,7 +597,16 @@ export default function OutageDashboard({
 
     const targetData = scoped.length > 0 ? scoped : data;
 
-    const rawMeses = Array.from(new Set<string>(targetData.map(d => String(d.mes || '')).filter(Boolean)));
+    // Meses must be extracted from the entire dataset (or semester scoped) so all months from JAN_JUN and JUL_DEZ are selectable
+    const monthSourceData = (filters.semestre && filters.semestre !== 'Todos')
+      ? data.filter(d => {
+          const is1st = filters.semestre === '1º Semestre';
+          const is1stItem = d.semestre === '1º Semestre' || ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho'].includes(d.mes);
+          return is1st ? is1stItem : !is1stItem;
+        })
+      : data;
+
+    const rawMeses = Array.from(new Set<string>(monthSourceData.map(d => String(d.mes || '')).filter(Boolean)));
     const meses: string[] = ['Todos', ...rawMeses.sort((a: string, b: string) => {
       const idxA = MONTH_ORDER.indexOf(a);
       const idxB = MONTH_ORDER.indexOf(b);
@@ -610,6 +666,17 @@ export default function OutageDashboard({
     const isAllOrEmpty = (arr?: string[]) => !arr || arr.length === 0 || arr.includes('Todos');
 
     return data.filter(item => {
+      // Semestre (JAN_JUN vs JUL_DEZ)
+      if (filters.semestre && filters.semestre !== 'Todos') {
+        const is1st = filters.semestre === '1º Semestre';
+        const itemSem = item.semestre;
+        const itemMes = item.mes;
+        const is1stItem = itemSem === '1º Semestre' || ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho'].includes(itemMes);
+        const is2ndItem = itemSem === '2º Semestre' || ['Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'].includes(itemMes);
+        if (is1st && !is1stItem) return false;
+        if (!is1st && !is2ndItem) return false;
+      }
+
       // Mês
       if (!isAllOrEmpty(filters.mes)) {
         const itemMes = norm(item.mes);
@@ -1670,14 +1737,24 @@ export default function OutageDashboard({
       }
 
       const headerRow = (matrix[bestHeaderIdx] || []).map(c => String(c).trim());
-      const hasCidade = findColIndex(headerRow, ['cidade', 'municipio', 'localidade', 'estr_municipio', 'regional']) !== -1;
-      const hasCatOp2 = findColIndex(headerRow, ['cat. op. 2', 'cat. op 2', 'cat op 2', 'cat_op_2', 'catop2', 'categoria operacional 2', 'cat operacional 2', 'tipo_evento', 'tipo de evento', 'tipo_falha', 'tipo falha', 'tipo incidente', 'tipo outage', 'operacional']) !== -1;
-      const hasInicio = findColIndex(headerRow, ['inicio', 'início', 'data', 'dt_inicio', 'dt_início', 'data_inicio', 'abertura', 'dt_abertura', 'data_hora']) !== -1;
-      const hasCatProd2 = findColIndex(headerRow, ['cat. prod. 2', 'cat. prod 2', 'cat prod 2', 'cat_prod_2', 'catprod2', 'categoria']) !== -1;
+      const hasCidade = findColIndex(headerRow, ['cidade', 'municipio', 'localidade', 'estr_municipio', 'regional', 'nm_municipio', 'praca', 'praça']) !== -1;
+      const hasCatOp2 = findColIndex(headerRow, ['cat. op. 2', 'cat. op 2', 'cat op 2', 'cat_op_2', 'catop2', 'categoria operacional 2', 'cat operacional 2', 'tipo_evento', 'tipo de evento', 'tipo_falha', 'tipo falha', 'tipo incidente', 'tipo outage', 'operacional', 'tipo']) !== -1;
+      const hasInicio = findColIndex(headerRow, ['inicio', 'início', 'data', 'dt_inicio', 'dt_início', 'data_inicio', 'abertura', 'dt_abertura', 'data_hora', 'data hora']) !== -1;
+      const hasCatProd2 = findColIndex(headerRow, ['cat. prod. 2', 'cat. prod 2', 'cat prod 2', 'cat_prod_2', 'catprod2', 'categoria', 'cat prod']) !== -1;
+      const hasTopologia = findColIndex(headerRow, ['topologia', 'node', 'elemento', 'afetado']) !== -1;
+      const hasIncidente = findColIndex(headerRow, ['incidente', 'evento', 'ticket', 'chamado', 'id', 'numero']) !== -1;
       
       // Guard: An AT5 sheet has order-specific columns. It must NEVER be parsed as an Outage sheet!
       const isAt5Sheet = findColIndex(headerRow, ['qt_os_padrao', 'codigo_baixa', 'contrato', 'tipo_os', 'nm_empresa_execucao', 'area_despacho']) !== -1;
-      const isRawData = !isAt5Sheet && (hasCidade && (hasInicio || hasCatProd2 || hasCatOp2)) && matrix.length > (bestHeaderIdx + 1);
+      
+      const normSheet = normalizeStr(sheetName);
+      const isSemesterTab = normSheet.includes('jan_jun') || normSheet.includes('jul_dez') || normSheet.includes('jan-jun') || normSheet.includes('jul-dez') || normSheet.includes('janjun') || normSheet.includes('juldez') || normSheet.includes('semestre') || normSheet.includes('1_sem') || normSheet.includes('2_sem');
+
+      const isRawData = !isAt5Sheet && matrix.length > (bestHeaderIdx + 1) && (
+        (hasCidade && (hasInicio || hasCatProd2 || hasCatOp2 || hasTopologia)) ||
+        (isSemesterTab && (hasCidade || hasInicio || hasIncidente || hasTopologia || maxHeaderMatches >= 4)) ||
+        (maxHeaderMatches >= 6)
+      );
 
       // Check for Pivot Matrix
       let pivotHeaderRowIdx = -1;
@@ -1722,19 +1799,33 @@ export default function OutageDashboard({
     const parsedEvents: OutageEvent[] = [];
     let globalCounter = 10001;
 
-    // Check if we have at least one valid Raw Data sheet
+    // Check if we have semester tabs (JAN_JUN, JUL_DEZ) or standard raw data sheets
+    const semesterSheets = sheetAnalyses.filter(s => s.isRawData && s.rawRowCount > 0 && (
+      normalizeStr(s.sheetName).includes('jan_jun') || normalizeStr(s.sheetName).includes('jul_dez') ||
+      normalizeStr(s.sheetName).includes('jan-jun') || normalizeStr(s.sheetName).includes('jul-dez') ||
+      normalizeStr(s.sheetName).includes('janjun') || normalizeStr(s.sheetName).includes('juldez') ||
+      normalizeStr(s.sheetName).includes('semestre') || normalizeStr(s.sheetName).includes('1_sem') || normalizeStr(s.sheetName).includes('2_sem')
+    ));
+
     const rawSheets = sheetAnalyses.filter(s => s.isRawData && s.rawRowCount > 0);
 
-    // Process ALL valid raw outage sheets across the entire workbook so no topologies or months are lost!
-    let targetSheets = rawSheets;
+    // Process ALL valid raw outage sheets or semester tabs found across the entire workbook
+    const targetSheets = semesterSheets.length > 0 ? semesterSheets : rawSheets;
+    const sheetEventCounts: { sheetName: string; count: number; semester?: string }[] = [];
 
     if (targetSheets.length > 0) {
       targetSheets.forEach(sheetInfo => {
         const { sheetName, matrix, headerRowIndex, headerRow } = sheetInfo;
+        const normSheet = normalizeStr(sheetName);
+        const isJanJunSheet = normSheet.includes('jan_jun') || normSheet.includes('jan-jun') || normSheet.includes('janjun') || normSheet.includes('jan_a_jun') || (normSheet.includes('jan') && normSheet.includes('jun'));
+        const isJulDezSheet = normSheet.includes('jul_dez') || normSheet.includes('jul-dez') || normSheet.includes('juldez') || normSheet.includes('jul_a_dez') || (normSheet.includes('jul') && normSheet.includes('dez'));
+        const sheetSemesterLabel = isJanJunSheet ? '1º Semestre' : (isJulDezSheet ? '2º Semestre' : '');
+
+        let countForThisSheet = 0;
         
         // Detect sheet-specific month
         const sheetMonthIdx = detectMonthIndex(sheetName);
-        const defaultMonth = sheetMonthIdx !== -1 ? MONTH_ORDER[sheetMonthIdx] : (globalDetectedMonthName || 'Agosto');
+        const defaultMonth = sheetMonthIdx !== -1 ? MONTH_ORDER[sheetMonthIdx] : (isJanJunSheet ? 'Junho' : (isJulDezSheet ? 'Dezembro' : (globalDetectedMonthName || 'Agosto')));
 
         const dataRows = matrix.slice(headerRowIndex + 1);
 
@@ -1945,10 +2036,19 @@ export default function OutageDashboard({
             clientesAfetados: isNaN(clientesRaw) || clientesRaw <= 0 ? Math.floor(100 + (globalCounter % 800)) : clientesRaw,
             duracaoMinutos: finalDuracao,
             descricao: descricaoRaw || (topologia ? `[${catProd2}] [Cat. Op. 2: ${tipo}] Evento na topologia ${topologia} em ${cidadeRaw}.` : `[${catProd2}] [Cat. Op. 2: ${tipo}] Evento em ${cidadeRaw}.`),
-            fullDate: new Date(parsedInicio.dateStr)
+            fullDate: new Date(parsedInicio.dateStr),
+            abaOrigem: sheetName,
+            semestre: sheetSemesterLabel || (parsedInicio.month <= 6 ? '1º Semestre' : '2º Semestre')
           });
 
           globalCounter++;
+          countForThisSheet++;
+        });
+
+        sheetEventCounts.push({
+          sheetName,
+          count: countForThisSheet,
+          semester: sheetSemesterLabel || (isJanJunSheet ? '1º Semestre' : (isJulDezSheet ? '2º Semestre' : 'Geral'))
         });
       });
     } else {
@@ -2064,10 +2164,15 @@ export default function OutageDashboard({
 
     if (parsedEvents.length > 0) {
       setData(parsedEvents);
+      setImportSuccessInfo({
+        sheetsRead: sheetEventCounts,
+        totalEvents: parsedEvents.length
+      });
       // STRICT USER REQUIREMENT: "quando carregar os dados, sempre aparecer o mês corrente."
       const currentMonth = getCurrentOrLatestMonth(parsedEvents);
       setFilters(prev => ({
         ...prev,
+        semestre: 'Todos',
         mes: [currentMonth],
         semana: ['Todos'],
         cidade: ['Todos'],
@@ -2380,6 +2485,7 @@ export default function OutageDashboard({
                 setData(sample);
                 const targetMonth = getCurrentOrLatestMonth(sample);
                 setFilters({
+                  semestre: 'Todos',
                   mes: [targetMonth],
                   semana: ['Todos'],
                   cidade: ['Todos'],
@@ -2404,6 +2510,7 @@ export default function OutageDashboard({
                 onClick={() => {
                   setData([]);
                   setFilters({
+                    semestre: 'Todos',
                     mes: ['Todos'],
                     semana: ['Todos'],
                     cidade: ['Todos'],
@@ -2514,6 +2621,7 @@ export default function OutageDashboard({
                   setData(sample);
                   const targetMonth = getCurrentOrLatestMonth(sample);
                   setFilters({
+                    semestre: 'Todos',
                     mes: [targetMonth],
                     semana: ['Todos'],
                     cidade: ['Todos'],
@@ -2544,7 +2652,8 @@ export default function OutageDashboard({
                   <Filter className="w-4 h-4 text-[#EE1D23]" />
                   <h2>Filtros de Pesquisa - OUTAGE</h2>
                 </div>
-                {(filters.mes.length > 0 && !filters.mes.includes('Todos') || 
+                {(filters.semestre !== 'Todos' ||
+                  filters.mes.length > 0 && !filters.mes.includes('Todos') || 
                   filters.semana.length > 0 && !filters.semana.includes('Todos') || 
                   filters.cidade.length > 0 && !filters.cidade.includes('Todos') || 
                   filters.topologia.length > 0 && !filters.topologia.includes('Todos') || 
@@ -2554,6 +2663,7 @@ export default function OutageDashboard({
                   filters.startDate || filters.endDate) && (
                   <button
                     onClick={() => setFilters({
+                      semestre: 'Todos',
                       mes: [getCurrentOrLatestMonth(data)],
                       semana: ['Todos'],
                       cidade: ['Todos'],
@@ -2570,6 +2680,65 @@ export default function OutageDashboard({
                     <RotateCcw className="w-3 h-3" />
                     Limpar Filtros
                   </button>
+                )}
+              </div>
+
+              {/* Semester Tabs / Quick Selector & Sheet Status */}
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-6 p-3.5 rounded-2xl bg-slate-50/80 border border-slate-200/80">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="text-xs font-black text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-[#EE1D23]" />
+                    Semestre / Período:
+                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5 bg-white p-1 rounded-xl border border-slate-200 shadow-2xs">
+                    <button
+                      onClick={() => setFilters(f => ({ ...f, semestre: 'Todos', mes: ['Todos'] }))}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all uppercase italic cursor-pointer ${
+                        filters.semestre === 'Todos'
+                          ? 'bg-[#EE1D23] text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                      }`}
+                    >
+                      Todos os Semestres ({data.length.toLocaleString('pt-BR')})
+                    </button>
+                    <button
+                      onClick={() => setFilters(f => ({ ...f, semestre: '1º Semestre', mes: ['Todos'] }))}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all uppercase italic cursor-pointer ${
+                        filters.semestre === '1º Semestre'
+                          ? 'bg-[#EE1D23] text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                      }`}
+                    >
+                      1º Semestre (JAN - JUN)
+                    </button>
+                    <button
+                      onClick={() => setFilters(f => ({ ...f, semestre: '2º Semestre', mes: ['Todos'] }))}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all uppercase italic cursor-pointer ${
+                        filters.semestre === '2º Semestre'
+                          ? 'bg-[#EE1D23] text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                      }`}
+                    >
+                      2º Semestre (JUL - DEZ)
+                    </button>
+                  </div>
+                </div>
+
+                {/* Sheets Read Info Badge */}
+                {detectedSheetsSummary.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-slate-600">
+                    <span className="text-slate-400 font-bold uppercase tracking-wider text-[10px]">Abas Lidas do Excel:</span>
+                    {detectedSheetsSummary.map(s => (
+                      <span 
+                        key={s.sheetName} 
+                        className="inline-flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-lg border border-slate-200 text-slate-800 font-mono text-[11px] shadow-2xs"
+                      >
+                        <FileCheck className="w-3 h-3 text-emerald-600" />
+                        <span className="font-black text-slate-900">{s.sheetName}</span>
+                        <span className="text-slate-400 font-sans">({s.count.toLocaleString('pt-BR')} registros)</span>
+                      </span>
+                    ))}
+                  </div>
                 )}
               </div>
 
